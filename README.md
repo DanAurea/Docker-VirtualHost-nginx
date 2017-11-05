@@ -7,6 +7,7 @@ to make it work more flexibly with containers.
 Keep in mind that its current purpose is to deal with containerized nginx and virtualhost with ease.
 
 A manager has been made for dealing with some recurrent actions:
+
 	- Creation of a new virtualhost via templates.
 	- Enabling and disabling virtualhost (add/remove symoblic link from sites-enabled)
 	- Deletion of a domain/virtualhost content

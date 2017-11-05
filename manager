@@ -1,0 +1,368 @@
+#!/bin/bash
+
+########## Virtual host creation through docker container on nginx Server 		   ##########
+
+########## Website's virtual domain refers there to subdomain virtual host or 	   ##########
+########## subdomain basic configuration, take this as an easier way to put online ##########
+########## websites.															   ##########
+
+
+########## TODO List:															   ##########
+
+########## TODO: Multi options command with arguments shifting  + install script   ##########
+########## TODO: Confirmation on deletion or disable of a virtual host  		   ##########
+########## TODO: Add composer option (create one directory for virtual host)       ##########
+
+user="${SUDO_USER:-$(whoami)}"
+
+## Check if current user has permissions to execute this script
+
+if [ "$user" != "root" ] && [ "$(groups $user | grep -coE "(docker|web)" )" -eq "0" ];
+	then
+	echo "You don't have permissions to create virtual hosts. Please contact your server administrator."
+	exit 1;
+fi
+
+
+##### Environment variables
+
+## Root variables
+root="/root/Documents/Server" ## Server's root
+rootWWW="/var/www" ## Root path where virtual host will be stored in container
+
+## Nginx related directories
+www="$root/data/web/www" ## Root path where virtual host will be stored on host
+lnDir="$root/data/web/nginx/sites-conf" ## Root path of sites enabled on host
+enabled="/etc/nginx/sites-enabled" ## Root path of sites enabled in container
+
+SCRIPTPATH="$(dirname "$(readlink -f "$0")")" ## Root path of script following symlinks
+
+
+##### Functions
+
+## Common usage
+function usage () {
+    echo "usage: vhost < -c | --create > <domain> [rootDir] | < -e | --erase > <domain> [rootDir] | < -d | --disable > <domain> [rootDir] | [-h | --help]"
+}
+
+## Check if nginx is running by returning
+## number of process called nginx
+function isRunning () {
+	echo "$(ps -e | grep -c nginx)"
+}
+
+## Reload nginx through container
+function nginxReload () {
+
+	if [ "$(isRunning)" -ne 0 ]; then
+		echo "nginx -s reload" | docker exec -i nginx /bin/bash
+	else
+		echo "Nginx is not currently running"
+		return 1
+	fi
+
+	return 0
+}
+
+## Create composer directory for virtual host
+function composer () {
+	
+	domain="$1"
+	composer="$root/data/web/php/composer"
+	domainComposer="$composer/$domain"
+
+	## Check if domain's name is set
+	if [ -z ${domain+x} ]; then
+		mkdir -p "$composer/$domain"
+		chmod -R 6750 "$composer/$domain"
+		chown -R brandon:web "$composer/$domain"
+
+		## Check if composer dependecies are set in json file
+		if [ -d "$www/$domain" ]; then
+			
+			if [ -f "$domainComposer/composer.json" ]; then
+				mv "$www/$domain/composer.json" "$domainComposer/"
+			fi
+
+			if [ -d "$domainComposer/vendors" ]; then
+				mv "$www/$domain/vendors" "$domainComposer/"
+			fi
+		fi
+
+	fi
+}
+
+##Display further informations on usage
+function help () {
+	usage
+
+	printf  "\n%-30s %s \n\n%90s \n%111s \n\n" "-c | --create " "Create a new virtual host in domain's name dir at root directory specified by user" \
+			"Example: vhost -c space-popcorn-interactive.fr myWebsite" "Will create a virtual host at /var/www/space-popcorn-interactive.fr/myWebsite"
+	printf  "%103s \n %122s \n" \
+			"Example: vhost -c space-popcorn-interactive.fr /mySubDomain/myWebsite" "Will create a virtual host at /var/www/space-popcorn-interactive.fr/mySubDomain/myWebsite"
+
+	printf  "\n%-30s %s \n\n%90s \n%115s \n\n" "-e | --erase " "Delete a website, domain or subdomain from virtual hosts" \
+			"Example: vhost -e space-popcorn-interactive.fr myWebsite" "Will delete folder and content at /var/www/space-popcorn-interactive.fr/myWebsite"
+	printf  "%80s \n %104s \n" \
+			"Example: vhost -e space-popcorn-interactive.fr" "Will delete folder and content at /var/www/space-popcorn-interactive.fr"
+
+	printf  "\n%-30s %s \n\n%92s \n%114s \n\n" "-d | --disable " "Disable a website, domain or subdomain from virtual hosts, content is still there but symlink is broken" \
+			"Example: vhost -d space-popcorn-interactive.fr myWebsite" "Will disable myWebsite so it's still available but no more visible from internet"
+
+	printf  "\n%-30s %s\n\n" "-h | --help " "Display this help menu"
+
+}
+
+## Delete a virtual host from web server
+function erase () {
+
+	domain="$1"
+	domainPath="$www/$domain"
+
+	## Check if domain is set
+	if [ ! -z ${domain+x} ]; then
+		
+		if [ -L "$lnDir/$domain" ]; then
+			disable "$domain"
+		fi
+
+		## Delete virtual host only if existing
+		if [ -d "$domainPath" ]; then
+			rm -R "$domainPath"
+			nginxReload
+		else
+			echo "Virtual host not found, it can't be deleted."
+			return 1
+		fi
+
+	fi
+
+	return 0
+
+}
+
+## Enable a virtual host from web server
+function enable () {
+	
+	domain="$1"
+	domainPath="$www/$domain"
+
+	## Check if domain is set
+	if [ ! -z ${domain+x} ]; then
+
+		## Enable virtual host by creating symlink of virtual.conf in right destination
+		if [ -d "$domainPath" ]; then
+			echo "ln -s $rootWWW/$domain/conf/virtual.conf $enabled/$domain" | docker exec -i nginx /bin/bash
+			nginxReload
+
+		else
+			echo "Virtual not found, it can't be enabled."
+			return 1
+		fi
+
+	fi
+
+	return 0
+}
+
+## Disable a virtual host from web server
+function disable () {
+	
+	domain="$1"
+
+	## Check if domain is set
+	if [ ! -z ${domain+x} ]; then
+
+		## Check if symlink exists and delete it through docker container
+		## because of security issue, symlinks are not mounted so can't be
+		## deleted on host if shared.
+		if [ -L "$lnDir/$domain" ]; then
+			echo "rm $enabled/$domain" | docker exec -i nginx /bin/bash
+			nginxReload
+		elif [ ! -d "$www/$domain" ]; then
+			echo "Virtual host not found, it can't be disabled."
+			return 1
+		else
+			echo "Virtual host not enabled, it can't be disabled."
+			return 1
+		fi
+
+	fi
+
+	return 0
+}
+
+## Create any config files for virtual host
+#### Check umask and set a new value when creating new files else rights denied ####
+function createDomainConf () {
+	
+	## Define path to each config directories
+	domainRoot="$rootWWW/$2"
+	conf="$1/conf/virtual.conf"
+	log="$domainRoot/logs"
+	default="$SCRIPTPATH/conf/default.conf"
+	php="$SCRIPTPATH/conf/php.conf"
+
+	## Create one blank file named default.conf
+	touch "$conf"
+
+	## Default.conf can't be created
+	if [ $? -ne 0 ]; then
+		echo "Default.conf at $conf can't be created, check permissions and try again."
+		return 1
+	fi
+
+	## Create basic server config with domain's name
+	echo -e "server{\n" > "$conf"
+	echo -e "\tserver_name $2 www.$2;\n" >> "$conf"
+	echo -e "\troot $rootWWW/$domain/www;" >> "$conf"
+
+	cat "$default" >> "$conf"
+	echo -e "\n\n" >> "$conf"
+	cat "$php" >> "$conf"
+	
+	echo -e "\n\n\taccess_log $log/access.log vhosts;" >> "$conf"
+	echo -e "\terror_log $log/error.log;" >> "$conf"
+	echo -e "\terror_page 404 /errors/404.html;" >> "$conf"
+	
+	echo "}" >> "$conf"
+
+	return 0
+
+}
+
+## Create a virtual host from start
+function createVhost () {
+
+	domain="$1"
+	website="$2"
+
+	domainPath="$www/$domain"
+
+	vhost="$www/$domain/www/$website"
+
+	##  Check if domain's virtual host is already existing
+	if [ ! -d "$domainPath" ]; then
+		
+		## Create domain's virtual host with required directories
+		mkdir -p "$domainPath"/{conf/{auth,ssl},errors,logs,www}
+		
+		## Mkdir failed
+		if [ $? -ne 0 ] ; then
+		    echo "$domainPath can't be created"
+		    return 1
+		fi
+
+		## Set correct owner on virtual host because of sudo system call
+		## virtual host is created with root owner by default
+		chown $user -R "$domainPath"
+
+		## Set setgid/setuid bits on virtual host for an easier management by owner
+		chmod 6770 -R "$domainPath/logs" "$domainPath/conf" "$domainPath/errors"
+		chmod 6750 -R "$domainPath/www"
+
+		createDomainConf "$domainPath" "$domain"
+
+		if [ $? -ne 0 ]; then
+			echo "Domain's configuration can't be created."
+			return 1
+		fi
+
+		nginxReload
+
+	else
+		echo "Virtual host $domainPath already existing, it can't be overwrited."
+		return 1
+	fi
+
+	## Check if website's virtual host is set and is already existing
+	if [ -z ${website+x} ]; then
+		
+		if [ ! -d "$vhost" ]; then
+
+			## Create website's virtual host with required directories
+			mkdir -p "$vhost"/{conf,logs,www}
+			
+			## Mkdir failed
+			if [ $? -ne 0 ] ; then
+			    echo "$vhost can't be created"
+			    exit 1
+			fi
+			
+			nginxReload
+
+		else
+			echo "Virtual host $vhost already existing, it can't be overwrited."
+			return 1
+		fi
+
+	fi
+	
+	return 0
+}
+
+## Check validity of asked virtual host then create one virtual 
+## host with some basic configuration.
+function create () {
+
+	if [ -z "$1" ]; then
+		echo -e "Domain's name unfound please retry !"
+		usage
+	else
+
+		## Set domain's name and website's name
+		if [[ "$1" =~ ^(www\.)?([a-zA-Z0-9_-]{2,}\.){1,4}([a-zA-Z]{2,6})$ ]]; then
+				
+			## Set website's name properly
+			if [ ! -z "$2" ] && [[ "$2" =~ ^[a-zA-Z0-9_/-]{2,}$ ]]; then
+				website=$(echo $2 | sed -e 's#^/\{0,1\}\([a-zA-Z0-9/-]\{2,\}\)$#\L\1#g')
+			elif [ -z "$2" ]; then
+				website=""
+			else
+				echo "Website's name invalid, name must respect the following regexp: ^[a-zA-Z0-9_-]{2,}$"
+			fi
+
+			## Set domain's name properly
+			domain=$(echo $1 | sed -e 's/\(www.\)\{0,1\}\(\([a-zA-Z0-9-]\{2,\}.\)\{1,4\}\)\([a-zA-Z]\{2,6\}\)/\L\3\4/g')
+
+			createVhost "$domain" "$website"	
+
+		else
+			echo "Domain's name invalid, name must respect the following regexp: ^(www\.)?([a-zA-Z0-9_-]{2,}\.){1,4}([a-zA-Z]{2,6})$ "
+		fi
+		
+	fi
+}
+
+## Options list
+while [ "$1" != "" ]; do
+    case $1 in
+        -c)         			create $2 $3
+								shift 3
+								exit
+                                ;;
+        -e)    					erase $2 $3
+								shift 3
+								exit
+                                ;;
+        -en)    				enable $2 $3
+								shift 3
+								exit
+                                ;;
+        -d)    					disable $2 $3
+								shift 3
+								exit
+                                ;;
+        -h)           			help
+                                exit 0
+                                ;;
+        \?)                     usage
+								echo "Ex: vhost -c space-popcorn-interactive.fr myWebsite"
+							    echo "Ex: vhost -c space-popcorn-interactive.fr /myWebsite"
+							    echo "Ex: vhost -c space-popcorn-interactive.fr /mySubDomain/myWebsite"
+							    echo "Ex: vhost -c Tales4Craft.fr"
+							    echo "Ex: vhost -c Tales4Craft.fr /"
+                                exit 1
+    esac
+    shift
+done
